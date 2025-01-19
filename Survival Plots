@@ -1,0 +1,242 @@
+# Load necessary libraries
+library(readxl)
+library(readxl)
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+
+
+
+# Read the data
+data <- read_excel("Path")
+
+# Adding calculation for recurrence time and updating Recurrence Status with blank cells considered
+df <- data %>%
+  select(
+    person_id, Gender, ethnicity, obesity, `Polyp Onset Stratification`,
+    `Adenoma Type`, `Recurrence Status`, `Time to Recurrence`,
+    birth_datetime, polypectomy_date_1, polypectomy_date_2, `Polyp Type`, Dysplasia,
+    `Number of Polyp`, `Size of Polyp (mm)`, `First Recurrence Date`, Number_of_Recurrence
+  ) %>%
+  mutate(
+    # Calculate recurrence time in months, handling missing polypectomy_date_2
+    recurrence_time_months = ifelse(
+      !is.na(polypectomy_date_2),
+      as.numeric(as.Date(polypectomy_date_2) - as.Date(polypectomy_date_1)) / 30.44,
+      NA
+    ),
+    # Update Recurrence Status based on the 6-month threshold or missing polypectomy_date_2
+    `Recurrence Status` = ifelse(
+      is.na(recurrence_time_months) | recurrence_time_months < 6,
+      "Not Recurrence",
+      "Recurrence"
+    ),
+    event = ifelse(`Recurrence Status` == "Recurrence", 1, 0),
+    age_in = as.numeric(as.Date(polypectomy_date_1) - as.Date(birth_datetime)) / 365.25,
+    age_out = as.numeric(as.Date(`First Recurrence Date`) - as.Date(birth_datetime)) / 365.25,
+    age_grp = cut(age_in, breaks = c(0, 50, 60, 70, 96), labels = 1:4)
+  ) %>%
+  # Filter valid rows based on conditions
+  filter(age_out > age_in & age_in >= 18 & ethnicity != "Other" & !is.na(`Adenoma Type`)
+  ) %>%
+  # Add reference levels for all categorical variables
+  mutate(
+    Gender = relevel(factor(Gender), ref = "Female"),
+    ethnicity = relevel(factor(ethnicity), ref = "Non-Hispanic White"),
+    `Polyp Onset Stratification` = relevel(factor(`Polyp Onset Stratification`), ref = "51-75"),
+    Dysplasia = relevel(factor(Dysplasia), ref = "Low grade"),
+    `Number of Polyp` = relevel(factor(`Number of Polyp`), ref = "<3"),
+    `Size of Polyp (mm)` = relevel(factor(`Size of Polyp (mm)`), ref = "<10"),
+    `Adenoma Type` = relevel(factor(`Adenoma Type`), ref = "Low Risk"),
+    `Polyp Type` = relevel(factor(`Polyp Type`), ref = "Tubular")
+  ) %>%
+  # Add new variables for analysis with proper coding
+  mutate(
+    sex = ifelse(Gender == "Female", 0, 1),
+    race = factor(ifelse(
+      ethnicity == "Non-Hispanic White", 1,
+      ifelse(ethnicity == "Non-Hispanic Black", 2,
+             ifelse(ethnicity == "Hispanic", 3,
+                    ifelse(ethnicity == "Asian or Pacific Islander", 4, NA)
+             )
+      )
+    )),
+    `Adenoma Type` = ifelse(`Adenoma Type` == "Low Risk", 0, 1),
+    polyp_strat = factor(`Polyp Onset Stratification`)  # Already encoded with 51-75 as reference
+  )
+
+
+
+# View dimensions and count of Recurrence Status
+dim(df)
+df %>% count(`Recurrence Status`)
+
+df <- df %>%
+  mutate(
+    time_to_recurrence = age_out - age_in
+  )
+
+
+# Cox Proportional Hazards Model
+mod3 <- coxph(Surv(time_to_recurrence, event) ~ race + age_in + sex + obesity + `polyp_strat` + 
+                strata(age_grp),  data = df)
+
+# Summary of mod3
+summary(mod3)
+
+# Proportional hazards assumption check
+cox.zph(mod3)
+
+# New data for predictions - concise version
+newdd_race <- data.frame(race = factor(1:4), sex = 0, obesity = 0, age_grp = factor(2), age_in = mean(df$age_in),
+                         polyp_strat = factor("51-75", levels = c("51-75", "≥ 76", "0-50")))
+
+newdd_sex <- data.frame(race = factor(1), sex = 0:1, obesity = 0, age_grp = factor(2), age_in = mean(df$age_in),
+                        polyp_strat = factor("51-75", levels = c("51-75", "≥ 76", "0-50")))
+
+newdd_obesity <- data.frame(race = factor(1), sex = 0, obesity = 0:1, age_grp = factor(2), age_in = mean(df$age_in),
+                            polyp_strat = factor("51-75", levels = c("51-75", "≥ 76", "0-50")))
+
+newdd_polyp_strat <- data.frame(race = factor(1), sex = 0, obesity = 0, age_grp = factor(2), age_in = mean(df$age_in),
+                                polyp_strat = factor(c("51-75", "≥ 76", "0-50"), levels = c("51-75", "≥ 76", "0-50")))
+
+# Functions for individual plots with tables
+generate_race_plot <- function(fit, title) {
+  plot(
+    fit,
+    col = c("#1F78B4", "#D55E00", "#33A02C", "#FF7F00"), lwd = 2,
+    xlab = "Time to Recurrence (Years)", 
+    ylab = "Adjusted Survival Probability",
+    main = title, cex.main = 1.8, cex.lab = 1.5, cex.axis = 1.3
+  )
+  
+  
+  # Add horizontal gridlines
+  abline(h = seq(0, 1, by = 0.2), col = "grey80", lty = 1)
+  
+  # Redraw lines with correct colors
+  lines(fit, col = c("blue2", "black", "red2", "#FF7F00"), lwd = 2)  # Match the colors
+  
+  
+  legend("topright", 
+         legend = c("Non-Hispanic White (NHW)", "Non-Hispanic Black (NHB)", "Hispanic", "Asian or Pacific Islander (API)"), 
+         col = c("blue2", "black", "red2", "#FF7F00"), 
+         lwd = 2, bty = "n", cex = 1.3)
+  
+  # Race-specific table with Non-Hispanic White as reference
+  text(0.1, 0.4, "Ethnicity         HR    95% CI    p-value", adj = 0, cex = 1.2)
+  text(0.1, 0.35,  "API                  0.9   0.80-1.01     0.068", adj = 0, cex = 1.2)
+  text(0.1, 0.3, "NHB                0.88   0.84-0.93   <0.001", adj = 0, cex = 1.2)
+  text(0.1, 0.25,  "Hispanic          0.9   0.75-1.07      0.2", adj = 0, cex = 1.2)
+}
+
+generate_gender_plot <- function(fit, title) {
+  plot(
+    fit,
+    col = c("#1F78B4", "#D55E00"), lwd = 2,
+    xlab = "Time to Recurrence (Years)", 
+    ylab = "Adjusted Survival Probability",
+    main = title, cex.main = 1.8, cex.lab = 1.5, cex.axis = 1.3
+  )
+  
+  # Add horizontal gridlines
+  abline(h = seq(0, 1, by = 0.2), col = "grey80", lty = 1)
+  
+  # Redraw lines to ensure they're on top of gridlines
+  lines(fit, col = c("#1F78B4", "#FF7F00"), lwd = 2)
+  
+  legend("topright", 
+         legend = c("Female", "Male"), 
+         col = c("#1F78B4", "#D55E00"), 
+         lwd = 2, bty = "n", cex = 1.3)
+  
+  # Gender-specific table with Female as reference
+  text(0.1, 0.35, "Gender              HR    95% CI    p-value", adj = 0, cex = 1.2)
+  text(0.1, 0.3,  "Male                  1.14    1.11-1.17   <0.001", adj = 0, cex = 1.2)
+}
+
+generate_obesity_plot <- function(fit, title) {
+  plot(
+    fit,
+    col = c("#1F78B4", "#D55E00"), lwd = 2,
+    xlab = "Time to Recurrence (Years)", 
+    ylab = "Adjusted Survival Probability",
+    main = title, cex.main = 1.8, cex.lab = 1.5, cex.axis = 1.3
+  )
+  
+  # Add horizontal gridlines
+  abline(h = seq(0, 1, by = 0.2), col = "grey80", lty = 1)
+  
+  # Redraw lines to ensure they're on top of gridlines
+  lines(fit, col = c("#1F78B4", "#FF7F00"), lwd = 2)
+  
+  legend("topright", 
+         legend = c("Non-Obese", "Obese"), 
+         col = c("#1F78B4", "#D55E00"), 
+         lwd = 2, bty = "n", cex = 1.3)
+  
+  # Obesity-specific table
+  text(0.1, 0.35, "Obesity                   HR    95% CI    p-value", adj = 0, cex = 1.2)
+  text(0.1, 0.3, "Obese                    1.14   1.11-1.17   <0.001", adj = 0, cex = 1.2)
+}
+
+generate_polyp_plot <- function(fit, title) {
+  plot(
+    fit,
+    col = c("#1F78B4", "red3", "#FF7F00"), lwd = 2,
+    xlab = "Time to Recurrence (Years)", 
+    ylab = "Adjusted Survival Probability",
+    main = title, cex.main = 1.8, cex.lab = 1.5, cex.axis = 1.3
+  )
+  
+  
+  # Add horizontal gridlines
+  abline(h = seq(0, 1, by = 0.2), col = "grey80", lty = 1)
+  
+  # Redraw lines to ensure they're on top of gridlines
+  lines(fit, col = c("#1F78B4", "red3", "#FF7F00"), lwd = 2)
+  
+  
+  legend("topright", 
+         legend = c("0-50y", "51-75y", "≥ 76y"  ), 
+         col = c("#1F78B4", "#FF7F00", "red3"), 
+         lwd = 2, bty = "n", cex = 1.3)
+  
+  # Polyp Onset-specific table with ≥ 51 as reference
+  text(0.1, 0.35, "Polyp Onset Age (yr)    HR    95% CI    p-value", adj = 0, cex = 1.2)
+  text(0.1, 0.3, "0-50                              1.82   1.72-1.93     <0.001", adj = 0, cex = 1.2)
+  text(0.1, 0.25, "≥76                               0.65   0.57-0.74    <0.001", adj = 0, cex = 1.2)
+}
+
+str(df)
+summary(df$age_in)
+sum(is.na(df$age_in))
+
+# Save plots with tables
+jpeg("Survival Plots.jpeg", width = 20, height = 10, units = "in", res = 600)
+par(mfrow = c(2, 2), oma = c(0, 0, 2, 0), mar = c(5, 5, 4, 2) + 0.1)
+
+# Generate all plots with tables
+generate_race_plot(
+  survfit(mod3, newdata = newdd_race),
+  title = "A. Survival by Race"
+)
+
+generate_gender_plot(
+  survfit(mod3, newdata = newdd_sex),
+  title = "B. Survival by Gender"
+)
+
+generate_obesity_plot(
+  survfit(mod3, newdata = newdd_obesity),
+  title = "C. Survival by Obesity Status"
+)
+
+generate_polyp_plot(
+  survfit(mod3, newdata = newdd_polyp_strat),
+  title = "D. Survival by Polyp Onset Age"
+)
+
+dev.off()
+
