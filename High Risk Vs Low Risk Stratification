@@ -1,0 +1,190 @@
+# Load necessary libraries
+library(readxl)      
+library(dplyr)       
+library(survival)    
+library(gtsummary)   
+library(survminer)   
+library(ggplot2)     
+library(RColorBrewer)
+library(gridExtra)   
+library(grid)
+library(ggpubr)      
+
+# Read the data
+data <- read_excel("Path")
+
+# Data preprocessing
+df <- data %>%
+  mutate(
+    # Calculate recurrence time in months, handling missing polypectomy_date_2
+    recurrence_time_months = ifelse(
+      !is.na(polypectomy_date_2),
+      as.numeric(as.Date(polypectomy_date_2) - as.Date(polypectomy_date_1)) / 30.44,
+      NA
+    ),
+    # Update Recurrence Status based on the 6-month threshold or missing polypectomy_date_2
+    `Recurrence Status` = ifelse(
+      is.na(recurrence_time_months) | recurrence_time_months < 6,
+      "Not Recurrence",
+      "Recurrence"
+    ),
+    event = ifelse(`Recurrence Status` == "Recurrence", 1, 0),
+    age_in = as.numeric(as.Date(polypectomy_date_1) - as.Date(birth_datetime)) / 365.25,
+    age_out = as.numeric(as.Date(`First Recurrence Date`) - as.Date(birth_datetime)) / 365.25,
+    age_grp = cut(age_in, breaks = c(0, 50, 60, 70, 96), labels = 1:4),
+    `Time to Recurrence` = age_out - age_in)%>%
+  # Filter valid rows
+  filter(age_out > age_in & age_in >= 18 & ethnicity != "Other" & !is.na(`Adenoma Type`)) %>%
+  # Add reference levels for categorical variables
+  mutate(
+    Gender = relevel(factor(Gender), ref = "Female"),
+    ethnicity = relevel(factor(ethnicity), ref = "Non-Hispanic White"),
+    `Polyp Onset Stratification` = relevel(factor(`Polyp Onset Stratification`), ref = "51-75"),
+    Dysplasia = relevel(factor(Dysplasia), ref = "Low grade"),
+    `Number of Polyp` = relevel(factor(`Number of Polyp`), ref = "<3"),
+    `Size of Polyp (mm)` = relevel(factor(`Size of Polyp (mm)`), ref = "<10"),
+    `Adenoma Type` = relevel(factor(`Adenoma Type`), ref = "Low Risk"),
+    `Polyp Type` = relevel(factor(`Polyp Type`), ref = "Tubular")
+  ) %>%
+  # Add new variables for analysis
+  mutate(
+    sex = ifelse(Gender == "Female", 0, 1),
+    race = factor(ifelse(
+      ethnicity == "Non-Hispanic White", 1,
+      ifelse(ethnicity == "Non-Hispanic Black", 2,
+             ifelse(ethnicity == "Hispanic", 3,
+                    ifelse(ethnicity == "Asian or Pacific Islander", 4, NA)
+             )
+      )
+    )),
+    Adenoma_Type = ifelse(`Adenoma Type` == "Low Risk", 0, 1),
+    polyp_strat = factor(`Polyp Onset Stratification`)
+  )
+
+# View dimensions and count of Recurrence Status
+dim(df)
+df %>% count(`Recurrence Status`)
+df %>% count(`Polyp Type`)
+
+# Create stratified datasets
+male_data <- df %>% filter(Gender == "Male")
+female_data <- df %>% filter(Gender == "Female")
+Black_data <- df %>% filter(ethnicity == "Non-Hispanic Black")
+White_data <- df %>% filter(ethnicity == "Non-Hispanic White")
+early_onset <- df %>% filter(`Polyp Onset Stratification` == "0-50")
+mid_onset <- df %>% filter(`Polyp Onset Stratification` == "51-75")
+late_onset <- df %>% filter(`Polyp Onset Stratification` == "≥ 76")
+
+# Function to format HR text in academic style with actual values
+create_hr_text <- function(cox_model) {
+  # Extract values from the model
+  summary_cox <- summary(cox_model)
+  hr <- sprintf("%.2f", summary_cox$conf.int[1])
+  ci_lower <- sprintf("%.2f", summary_cox$conf.int[3])
+  ci_upper <- sprintf("%.2f", summary_cox$conf.int[4])
+  p_value <- if(summary_cox$coefficients[5] < 0.001) "< 0.001" else sprintf("= %.3f", summary_cox$coefficients[5])
+  
+  # Create the formatted text with actual values
+  label <- sprintf("HR = %s (95%% CI: %s-%s), p %s", 
+                   hr, ci_lower, ci_upper, p_value)
+  
+  return(label)
+}
+
+# Modified create_km_plot function that will display actual HR values
+create_km_plot <- function(data, section_label, strata_name, cox_model) {
+  fit <- survfit(Surv(`Time to Recurrence`, event) ~ Adenoma_Type, data = data)
+  
+  plot <- ggsurvplot(
+    fit,
+    data = data,
+    pval = FALSE,
+    pval.method = FALSE,
+    conf.int = FALSE,
+    conf.int.style = "ribbon",
+    conf.int.alpha = 0.1,
+    conf.int.size = 0.5,  # Controls confidence interval line width
+    size = 0.7,           # Controls main line width
+    censor = TRUE,
+    censor.size = 1.7,    # Controls censor marks size
+    risk.table = FALSE,
+    risk.table.col = "strata",
+    risk.table.height = 0.25,
+    xlab = "Time to Recurrence (Years)",
+    ylab = "Survival Probability",
+    title = paste(section_label, "-", strata_name),
+    xlim = c(0, 25),
+    palette = c("#0072B2", "#D55E00"),
+    break.x.by = 5,
+    break.time.by = 5,
+    legend.labs = c("Low Risk", "High Risk"),
+    ggtheme = theme_classic() +
+      theme(
+        panel.grid.major.y = element_line(color = "grey80", linetype = "solid"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(
+          size = 14,
+          face = "bold",
+          hjust = 0.01,
+          margin = margin(b = 15)
+        ),
+        axis.title.x = element_text(size = 12, face = "bold"),
+        axis.title.y = element_text(size = 12, face = "bold"),
+      )
+  )
+  
+  # Add HR text with actual values
+  plot$plot <- plot$plot + 
+    annotate("text", x = max(fit$time)*0.95, y = 0.95,
+             label = create_hr_text(cox_model),
+             size = 4,
+             hjust = 1,
+             fontface = "plain")
+  
+  return(plot)
+}
+
+# Create Cox models
+cox_male <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = male_data)
+cox_female <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = female_data)
+cox_Black <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = Black_data)
+cox_White <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = White_data)
+cox_early <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = early_onset)
+cox_mid <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = mid_onset)
+cox_late <- coxph(Surv(`Time to Recurrence`, event) ~ Adenoma_Type + strata(age_grp), data = late_onset)
+
+# Generate plots
+plot_male <- create_km_plot(male_data, "C", "Male", cox_male)
+plot_female <- create_km_plot(female_data, "D", "Female", cox_female)
+plot_Black <- create_km_plot(Black_data, "A", "Non-Hispanic Black", cox_Black)
+plot_White <- create_km_plot(White_data, "B", "Non-Hispanic White", cox_White)
+plot_early <- create_km_plot(early_onset, "E", "Early Onset (0-50y)", cox_early)
+plot_mid <- create_km_plot(mid_onset, "F", "Mid Onset (51-75y)", cox_mid)
+plot_late <- create_km_plot(late_onset, "G", "Late Onset (≥76y)", cox_late)
+
+# Combine and save plots
+jpeg("High Risk Vs Low Risk.jpeg", width = 22, height = 10, units = "in", res = 600)
+final_plot <- ggarrange(
+  ggarrange(plot_Black$plot, plot_White$plot, ncol = 2),
+  ggarrange(plot_male$plot, plot_female$plot, ncol = 2),
+  ggarrange(plot_early$plot, plot_mid$plot, plot_late$plot, ncol = 3),
+  nrow = 3
+)
+print(final_plot)
+dev.off()
+
+# Summary tables
+summary_tables <- list(
+  Black = tbl_regression(cox_Black, exponentiate = TRUE),
+  White = tbl_regression(cox_White, exponentiate = TRUE),
+  Male = tbl_regression(cox_male, exponentiate = TRUE),
+  Female = tbl_regression(cox_female, exponentiate = TRUE),
+  Early_Onset = tbl_regression(cox_early, exponentiate = TRUE),
+  Mid_Onset = tbl_regression(cox_mid, exponentiate = TRUE),
+  Late_Onset = tbl_regression(cox_late, exponentiate = TRUE)
+)
+
+print(summary_tables)
