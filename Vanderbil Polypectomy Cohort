@@ -4,6 +4,8 @@ library(survival)
 library(gridExtra)
 library(gt)
 library(gtsummary)
+library(metafor)
+library(gridExtra)   
 library(grid)
 library(ggpubr) 
 library(Cairo)
@@ -13,15 +15,21 @@ library(Cairo)
 # Read data
 data <- read_excel("Path")
 
+print(colnames(data))
 # Data preprocessing
 df <- data %>%
   select(
     person_id, Gender, ethnicity, obesity, `Polyp Onset Stratification`,
     `Adenoma Type`, `Recurrence Status`,
     birth_datetime, polypectomy_date_1, polypectomy_date_2, `Polyp Type`, Dysplasia,
-    `Number of Polyp`, `Size of Polyp (mm)`, `First Recurrence Date`, Number_of_Recurrence, `NSAIDs`, `Aspirin`
+    `Number of Polyp`, `Size of Polyp (mm)`, `First Recurrence Date`, Number_of_Recurrence, `NSAIDs`,
+    `Aspirin`, `family history of polyps`, `family history of colorectal cancer`
   ) %>%
-  mutate(
+  rename(
+    fh_crc = `family history of colorectal cancer`,
+    fh_polyps = `family history of polyps`
+  ) %>%
+    mutate(
     recurrence_time_months = ifelse(
       !is.na(polypectomy_date_2),
       as.numeric(as.Date(polypectomy_date_2) - as.Date(polypectomy_date_1)) / 30.44,
@@ -37,11 +45,11 @@ df <- data %>%
     age_out = as.numeric(as.Date(`First Recurrence Date`) - as.Date(birth_datetime)) / 365.25,
     age_grp = cut(age_in, breaks = c(0, 50, 60, 70, 96), labels = 1:4)
   ) %>%
-  filter(age_out > age_in & age_in >= 18 & ethnicity != "Other" & !is.na(`Adenoma Type`)) %>%
+  filter(age_out > age_in & age_in >= 18 & ethnicity != "Other" & !is.na(`Adenoma Type`), `Polyp Type` != "Non-neoplastic")%>%
   mutate(
     Gender = relevel(factor(Gender), ref = "Female"),
     ethnicity = relevel(factor(ethnicity), ref = "Non-Hispanic White"),
-    `Polyp Onset Stratification` = relevel(factor(`Polyp Onset Stratification`), ref = "51-75"),
+    `Polyp Onset Stratification` = relevel(factor(`Polyp Onset Stratification`), ref = "≥50"),
     Dysplasia = relevel(factor(Dysplasia), ref = "Low grade"),
     `Number of Polyp` = relevel(factor(`Number of Polyp`), ref = "<3"),
     `Size of Polyp (mm)` = relevel(factor(`Size of Polyp (mm)`), ref = "<10"),
@@ -62,33 +70,26 @@ df <- data %>%
     polyp_strat = factor(`Polyp Onset Stratification`)
   )
 
+levels(df$polyp_strat)
 # Calculate follow-up years
 df$fu_yrs <- df$age_out - df$age_in
 
-# Create additional factor variables for analysis with reference details
+# Create additional factor variables for analysis
 df <- within(df, {
-  PolypType <- as.factor(ifelse(`Polyp Type` == 'Tubular', 7,
-                                ifelse(`Polyp Type` == 'Mixed', 6,
-                                       ifelse(`Polyp Type` == 'Non-neoplastic', 5,
-                                              ifelse(`Polyp Type` == 'Not defined', 4,
-                                                     ifelse(`Polyp Type` == 'Serrated', 3,
-                                                            ifelse(`Polyp Type` == 'Tubulovillous', 2, 1))))))) # Reference: "Tubular" (coded as 7)
-  Dysplasiax <- as.factor(ifelse(Dysplasia == 'Low grade', 1, 0)) # Reference: "Low grade" (coded as 1)
+  PolypType <- as.factor(ifelse(`Polyp Type` == 'Tubular', 6,
+                                ifelse(`Polyp Type` == 'Mixed', 5,
+                                ifelse(`Polyp Type` == 'Not defined', 4,
+                                ifelse(`Polyp Type` == 'Serrated', 3,
+                                ifelse(`Polyp Type` == 'Tubulovillous', 2, 1))))))
+  Dysplasiax <- as.factor(ifelse(Dysplasia == 'Low grade', 1, 0))
   PolypNum <- as.factor(ifelse(`Number of Polyp` == '<3', 2,
-                               ifelse(`Number of Polyp` == '≥3', 1, 0))) # Reference: "<3" (coded as 2)
+                               ifelse(`Number of Polyp` == '≥3', 1, 0)))
   PolypSize <- as.factor(ifelse(`Size of Polyp (mm)` == '<10', 2,
-                                ifelse(`Size of Polyp (mm)` == '≥10', 1, 0))) # Reference: "<10" (coded as 2)
-  Gender <- as.factor(ifelse(Gender == 'Female', 0, 1)) # Reference: "Female" (coded as 0)
-  AdenomaType <- as.factor(ifelse(`Adenoma Type` == 'Low Risk', 0, 1)) # Reference: "Low Risk" (coded as 0)
-  Ethnicity <- as.factor(ifelse(ethnicity == 'Non-Hispanic White', 1,
-                                ifelse(ethnicity == 'Non-Hispanic Black', 2,
-                                       ifelse(ethnicity == 'Hispanic', 3,
-                                              ifelse(ethnicity == 'Asian or Pacific Islander', 4, NA))))) # Reference: "Non-Hispanic White" (coded as 1)
-  PolypOnsetStrat <- as.factor(ifelse(`Polyp Onset Stratification` == '51-75', 1,
-                                      ifelse(`Polyp Onset Stratification` == '<51', 2,
-                                             ifelse(`Polyp Onset Stratification` == '>75', 3, NA)))) # Reference: "51-75" (coded as 1)
-  # Obesity: Not explicitly relevelled, coded as obesity (0 = non-obese, 1 = obese) → Reference: "non-obese" (assumed 0)
+                                ifelse(`Size of Polyp (mm)` == '≥10', 1, 0)))
 })
+
+df$PolypType <- as.factor(df$PolypType)
+
 
 # Split data for time-dependent analysis and filter for ≤5 years
 dfs <- survSplit(Surv(fu_yrs, event) ~ ., data = df, cut = c(5, 10), end = 'tstop', episode = "tgroup")
@@ -98,6 +99,7 @@ dfs_5yr <- dfs %>% filter(tgroup == 1)
 dim(dfs_5yr)
 dfs_5yr %>% count(`Recurrence Status`)
 
+dim(df)
 
 dfs_5yr <- dfs_5yr %>%
   mutate(followup_time = tstop - tstart)
@@ -108,7 +110,7 @@ range(dfs_5yr$followup_time)
 
 
 # Define color palette
-color_palette <- c("#1F78B4", "#D55E00", "#33A02C", "#E6AB02", "#6A3D9A", "grey8", "red")
+color_palette <- c("#E7298A", "#D55E00", "#33A02C", "#E6AB02", "#6A3D9A", "grey8", "red")
 
 # Create custom theme with horizontal legend at the bottom
 custom_theme <- theme(
@@ -129,19 +131,21 @@ custom_theme <- theme(
 )
 
 # Models (unchanged)
-mod1 <- coxph(Surv(fu_yrs, event) ~ PolypType + ethnicity + sex + obesity + NSAIDs + Aspirin + age_in, data = df)
+mod1 <- coxph(Surv(fu_yrs, event) ~ PolypType + ethnicity + sex + obesity + NSAIDs + Aspirin + fh_crc + fh_polyps + age_in, data = df)
 newdd1 <- data.frame(
-  PolypType = as.factor(c(1:7)), 
+  PolypType = as.factor(c(1:6)), 
   age_in = 60, 
   ethnicity = 'Non-Hispanic White', 
   sex = 0, 
   obesity = 0, 
   NSAIDs = 0, 
-  Aspirin = 0
+  Aspirin = 0,
+  fh_crc = 0,
+  fh_polyps= 0
 )
-polyp_types <- c('Villous', 'Tubulovillous', 'Serrated', 'Not defined', 'Non-neoplastic', 'Mixed', 'Tubular')
+polyp_types <- c('Villous', 'Tubulovillous', 'Serrated', 'Not defined', 'Mixed', 'Tubular')
 
-mod2 <- coxph(Surv(fu_yrs, event) ~ Dysplasiax + ethnicity + sex + obesity + NSAIDs + Aspirin + age_in, data = df)
+mod2 <- coxph(Surv(fu_yrs, event) ~ Dysplasiax + ethnicity + sex + obesity + NSAIDs + Aspirin + fh_crc + fh_polyps + age_in, data = df)
 newdd2 <- data.frame(
   Dysplasiax = as.factor(c(0, 1)), 
   age_in = 60, 
@@ -149,11 +153,13 @@ newdd2 <- data.frame(
   sex = 0, 
   obesity = 0, 
   NSAIDs = 0, 
-  Aspirin = 0
+  Aspirin = 0,
+  fh_crc = 0,
+  fh_polyps= 0
 )
 dysplasia_types <- c('High grade', 'Low grade')
 
-mod3 <- coxph(Surv(fu_yrs, event) ~ PolypNum + ethnicity + sex + obesity + NSAIDs + Aspirin + age_in, data = df)
+mod3 <- coxph(Surv(fu_yrs, event) ~ PolypNum + ethnicity + sex + obesity + NSAIDs + Aspirin + fh_crc + fh_polyps + age_in, data = df)
 newdd3 <- data.frame(
   PolypNum = as.factor(c(0, 1, 2)), 
   age_in = 60, 
@@ -161,11 +167,13 @@ newdd3 <- data.frame(
   sex = 0, 
   obesity = 0, 
   NSAIDs = 0, 
-  Aspirin = 0
+  Aspirin = 0,
+  fh_crc = 0,
+  fh_polyps= 0
 )
-polyp_numbers <- c('Unknown', '≥3', '<3')
+polyp_numbers <- c('Not-defined ', '≥3', '<3')
 
-mod4 <- coxph(Surv(fu_yrs, event) ~ PolypSize + ethnicity + sex + obesity + NSAIDs + Aspirin + age_in, data = df)
+mod4 <- coxph(Surv(fu_yrs, event) ~ PolypSize + ethnicity + sex + obesity + NSAIDs + Aspirin + fh_crc + fh_polyps  + age_in, data = df)
 newdd4 <- data.frame(
   PolypSize = as.factor(c(0, 1, 2)), 
   age_in = 60, 
@@ -173,16 +181,19 @@ newdd4 <- data.frame(
   sex = 0, 
   obesity = 0, 
   NSAIDs = 0, 
-  Aspirin = 0
+  Aspirin = 0,
+  fh_crc = 0,
+  fh_polyps= 0
+  
 )
-polyp_sizes <- c('Unknown', '≥10', '<10')
+polyp_sizes <- c('Not-defined', '≥10', '<10')
 
 
 # Plots for 5-year follow-up
 # For Polyp Type
 sur1 <- survfit(mod1, newdata = newdd1)
 df_plot1 <- data.frame(time = sur1$time)
-for (i in 1:7) {
+for (i in 1:6) {
   df_plot1[, i + 1] <- sur1$surv[, i]
 }
 names(df_plot1) <- c('time', polyp_types)
@@ -194,17 +205,16 @@ plot1 <- ggplot(df_plot1_long, aes(x = time, y = 1 - surv, color = polyp)) +
   scale_color_manual(values = color_palette) +
   scale_x_continuous(limits = c(0, 5), breaks = seq(0, 5, 1)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-  labs(title = "(A) Polyp Type", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Polyp Type") +
+  labs(title = "(A) Adenoma Type", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Polyp Type") +
   theme_classic() +
   custom_theme +
   # Add table with placeholder values
   annotate("text", x = 0.2, y = 0.88, label= "                          HR      95% CI        p-value", hjust = 0, size = 4, fontface = "bold") +
-  annotate("text", x = 0.2, y = 0.78, label = bquote("Villous                2.4        2.18, 2.65      "~5.26 %*% 10^{-70}), hjust = 0, size = 4) +
-  annotate("text", x = 0.2, y = 0.71, label = bquote("Tubulovillous      2.15      1.96, 2.36     "~ 1.40 %*% 10^{-59}), hjust = 0,  size = 4) +
-  annotate("text", x = 0.2, y = 0.64, label = bquote("Serrated             1.31      1.19, 1.45     "~5.42 %*% 10^{-8}), hjust = 0, size = 4) +
-  annotate("text", x = 0.2, y = 0.57, label = bquote("Not defined        0.51      0.47, 0.56     "~4.31 %*% 10^{-59}), hjust = 0,  size = 4) +
-  annotate("text", x = 0.2, y = 0.5,  label = bquote("Non-neoplastic   0.59     0.54,  0.64     "~1.58 %*% 10^{-38}), hjust = 0,  size = 4) +
-  annotate("text", x = 0.2, y = 0.43, label = bquote("Mixed                 1.36      1.29, 1.43     "~3.41 %*% 10^{-30}), hjust = 0,  size = 4)
+  annotate("text", x = 0.2, y = 0.78, label = bquote("Villous                2.55        2.31, 2.81    "~4.55 %*% 10^{-79}), hjust = 0, size = 4) +
+  annotate("text", x = 0.2, y = 0.71, label = bquote("Tubulovillous      2.18      1.99, 2.39     "~1.58 %*% 10^{-61}), hjust = 0,  size = 4) +
+  annotate("text", x = 0.2, y = 0.64, label = bquote("Serrated             1.3       1.18, 1.44     "~1.10 %*% 10^{-7}), hjust = 0, size = 4) +
+  annotate("text", x = 0.2, y = 0.57, label = bquote("Not defined        0.53      0.48, 0.57     "~1.02 %*% 10^{-54}), hjust = 0,  size = 4) +
+  annotate("text", x = 0.2, y = 0.5, label = bquote("Mixed                 1.37      1.30, 1.45     "~6.99 %*% 10^{-32}), hjust = 0,  size = 4)
 
 # For Dysplasia
 sur2 <- survfit(mod2, newdata = newdd2)
@@ -226,7 +236,7 @@ plot2 <- ggplot(df_plot2_long, aes(x = time, y = 1 - surv, color = dysplasia)) +
   custom_theme +
   # Add table with placeholder values
   annotate("text", x = 0.2, y = 0.58, label = "                        HR      95% CI        p-value", hjust = 0, size = 4, fontface = "bold") +
-  annotate("text", x = 0.2, y = 0.5, label = bquote("High grade      2.91     2.59, 3.27    "~7.06 %*% 10^{-72}), hjust = 0,  size = 4)
+  annotate("text", x = 0.2, y = 0.5, label = bquote("High grade      2.86     2.54, 3.22    "~4.13 %*% 10^{-69}), hjust = 0,  size = 4)
 
 # For Number of Polyps
 sur3 <- survfit(mod3, newdata = newdd3)
@@ -243,13 +253,13 @@ plot3 <- ggplot(df_plot3_long, aes(x = time, y = 1 - surv, color = polyp_num)) +
   scale_color_manual(values = color_palette[1:3]) +
   scale_x_continuous(limits = c(0, 5), breaks = seq(0, 5, 1)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-  labs(title = "(C) Number of Polyps", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Number of Polyps") +
+  labs(title = "(C) Number of Adenoma", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Number of Polyps") +
   theme_classic() +
   custom_theme +
   # Add table with placeholder values
-  annotate("text", x = 0.2, y = 0.58, label ="                     HR      95% CI         p-value", hjust = 0,  size = 4, fontface = "bold") +
-  annotate("text", x = 0.2, y = 0.5, label =  bquote("≥3                 1.70     1.62, 1.79     "~2.53 %*% 10^{-88}), hjust = 0, size = 4) +
-  annotate("text", x = 0.2, y = 0.45, label = bquote("Unknown      1.17    1.09, 1.27     "~4.94 %*% 10^{-5}), hjust = 0, size = 4)
+  annotate("text", x = 0.2, y = 0.58, label ="                       HR      95% CI         p-value", hjust = 0,  size = 4, fontface = "bold") +
+  annotate("text", x = 0.2, y = 0.5, label =  bquote("≥3                  1.69     1.60, 1.79     "~5.95 %*% 10^{-80}), hjust = 0, size = 4) +
+  annotate("text", x = 0.2, y = 0.45, label = bquote("Not-defined    1.12    1.04, 1.21     "~3.81 %*% 10^{-3}), hjust = 0, size = 4)
 
 # For Polyp Size
 sur4 <- survfit(mod4, newdata = newdd4)
@@ -266,13 +276,13 @@ plot4 <- ggplot(df_plot4_long, aes(x = time, y = 1 - surv, color = polyp_size)) 
   scale_color_manual(values = color_palette[1:3]) +
   scale_x_continuous(limits = c(0, 5), breaks = seq(0, 5, 1)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-  labs(title = "(D) Polyp Size (mm)", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Polyp Size") +
+  labs(title = "(D) Adenoma Size (mm)", x = "Time to Recurrence (years)", y = "Probability of Recurrence", color = "Polyp Size") +
   theme_classic() +
   custom_theme +
   # Add table with placeholder values
-  annotate("text", x = 0.2, y = 0.58, label = "                   HR      95% CI        p-value", hjust = 0, size = 4, fontface = "bold") +
-  annotate("text", x = 0.2, y = 0.5, label = bquote("≥10              1.65    1.56, 1.75    "~2.15 %*% 10^{-63}), hjust = 0,  size = 4) +
-  annotate("text", x = 0.2, y = 0.45, label = bquote("Unknown     0.81    0.77, 0.85    "~8.77 %*% 10^{-18}), hjust = 0, size = 4)
+  annotate("text", x = 0.2, y = 0.58, label = "                       HR      95% CI        p-value", hjust = 0, size = 4, fontface = "bold") +
+  annotate("text", x = 0.2, y = 0.5, label = bquote("≥10                  1.63    1.53, 1.73    "~5.72 %*% 10^{-57}), hjust = 0,  size = 4) +
+  annotate("text", x = 0.2, y = 0.45, label = bquote("Not-defined     0.79    0.75, 0.83    "~6.94 %*% 10^{-20}), hjust = 0, size = 4)
 
 # Combine and save plots
 options(repr.plot.width = 18, repr.plot.height = 10)
@@ -281,12 +291,23 @@ combined_plot <- gridExtra::grid.arrange(
   ncol = 2
 )
 
-ggsave("Combined_Polyp_Survival_Analysis_5yr.png", combined_plot, width = 18, height = 11, dpi = 500)
-
+ggsave(
+  filename = "Usman... 11111233aaa. Combined_Polyp_Survival_Analysis_5yr.png",
+  plot = combined_plot,
+  path = "C:/Users/usman/OneDrive - Higher Education Commission/Research/Screening Guidelines/Polypectomy/1. Racial and Gender Disparity/Codes/Revised Codes",
+  width = 18,
+  height = 11,
+  dpi = 500
+)
 
 
 # Set output to PDF file
-cairo_pdf("Combined_Polyp_Survival_Analysis_5yr.pdf", width = 18, height = 11, family = "Arial Unicode MS")
+cairo_pdf(
+  file = "C:/Users/usman/OneDrive - Higher Education Commission/Research/Screening Guidelines/Polypectomy/1. Racial and Gender Disparity/Codes/Revised Codes/2222.Usman ...11111233aaa. Combined_Polyp_Survival_Analysis_5yr.pdf",
+  width = 18,
+  height = 11,
+  family = "Arial Unicode MS"
+)
 
 # Draw the combined plot
 grid.draw(combined_plot)
@@ -339,7 +360,7 @@ table(dfs$tgroup)
 
 # Model 1: Polyp Type (Aligned with model5 from Code 2)
 mod1s <- coxph(Surv(tstart, tstop, event) ~ PolypType:strata(tgroup) +
-                 Gender + ethnicity + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin +
+                 Gender + ethnicity + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
                  strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs)
 out1s <- as.data.frame(summary(mod1s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
@@ -351,9 +372,15 @@ out1s <- as.data.frame(summary(mod1s)$coef) %>%
 out1s # Results for PolypType, reference is 'Tubular'
 
 
+#levels(df$PolypType)
+#contrasts(df$PolypType)
+#mod1s <- coxph(Surv(tstart, tstop, event) ~ PolypType:strata(tgroup) + ..., data = dfs)
+#summary(mod1s)
+
+
 # Model 2: Dysplasia (Aligned with model5 from Code 2)
 mod2s <- coxph(Surv(tstart, tstop, event) ~ Dysplasiax:strata(tgroup) +
-                 Gender + ethnicity + `Polyp Type` + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin +
+                 Gender + ethnicity + `Polyp Type` + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
                  strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs)
 out2s <- as.data.frame(summary(mod2s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
@@ -365,9 +392,10 @@ out2s <- as.data.frame(summary(mod2s)$coef) %>%
 out2s # Results for Dysplasia, reference is 'Low grade'
 
 
+
 # Model 3: Number of Polyp (Aligned with model5 from Code 2)
 mod3s <- coxph(Surv(tstart, tstop, event) ~ PolypNum:strata(tgroup) +
-                 Gender + ethnicity + `Polyp Type` + Dysplasia + `Size of Polyp (mm)` + NSAIDs + Aspirin +
+                 Gender + ethnicity + `Polyp Type` + Dysplasia + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
                  strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs)
 out3s <- as.data.frame(summary(mod3s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
@@ -378,9 +406,11 @@ out3s <- as.data.frame(summary(mod3s)$coef) %>%
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
 out3s # Results for Number of Polyp, reference is '<3'
 
+
+
 # Model 4: Size of Polyp (Aligned with model5 from Code 2)
 mod4s <- coxph(Surv(tstart, tstop, event) ~ PolypSize:strata(tgroup) +
-                 Gender + ethnicity + `Polyp Type` + Dysplasia + `Number of Polyp` + NSAIDs + Aspirin +
+                 Gender + ethnicity + `Polyp Type` + Dysplasia + `Number of Polyp` + NSAIDs + Aspirin + fh_crc + fh_polyps +
                  strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs)
 out4s <- as.data.frame(summary(mod4s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
@@ -390,6 +420,10 @@ out4s <- as.data.frame(summary(mod4s)$coef) %>%
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
 out4s # Results for Size of Polyp (mm), reference is '<10'
+
+
+
+
 
 # Model 5: Gender with time-dependent interaction
 mod5s <- coxph(Surv(tstart, tstop, event) ~ Gender + strata(tgroup) + Gender:strata(tgroup) +
@@ -401,7 +435,10 @@ out5s <- as.data.frame(summary(mod5s)$coef) %>%
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out5s # Results for Gender, reference is 'Female'
+out5s # Results for Gender, reference is 'Female
+
+
+
 
 # Model 6: Ethnicity with time-dependent interaction
 mod6s <- coxph(Surv(tstart, tstop, event) ~ ethnicity + strata(tgroup) + ethnicity:strata(tgroup) +
@@ -415,6 +452,10 @@ out6s <- as.data.frame(summary(mod6s)$coef) %>%
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
 out6s # Results for Ethnicity, reference is 'Non-Hispanic White'
 
+
+
+
+
 # Model 7: Obesity with time-dependent interaction
 mod7s <- coxph(Surv(tstart, tstop, event) ~ obesity + strata(tgroup) + obesity:strata(tgroup) +
                  Gender + ethnicity + strata(age_grp), data = dfs)
@@ -427,10 +468,10 @@ out7s <- as.data.frame(summary(mod7s)$coef) %>%
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
 out7s # Results for Obesity, reference is non-obese
 
-
-# Model 8: Polyp Onset Stratification with time-dependent interaction
-mod8s <- coxph(Surv(tstart, tstop, event) ~ polyp_strat + strata(tgroup) + polyp_strat:strata(tgroup) +
-                 Gender + ethnicity + NSAIDs + Aspirin + strata(obesity, age_grp), data = dfs)
+levels(df$polyp_strat)
+# Model 8: Polyp Onset Stratification with time-dependent interaction    
+mod8s <- coxph(Surv(tstart, tstop, event)  ~  polyp_strat:strata(tgroup) + polyp_strat + strata(tgroup) +
+                 Gender + ethnicity + NSAIDs + Aspirin + fh_crc + fh_polyps + strata(obesity), data = dfs)
 out8s <- as.data.frame(summary(mod8s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
   filter(substr(variable, 1, 11) == 'polyp_strat') %>%
@@ -438,11 +479,13 @@ out8s <- as.data.frame(summary(mod8s)$coef) %>%
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out8s # Results for Polyp Onset Stratification, reference is '51-75'
+out8s # Results for Polyp Onset Stratification, reference is '>=50'
+  
+
 
 # Model 9: Adenoma Type (Aligned with model4 from Code 2)
 mod9s <- coxph(Surv(tstart, tstop, event) ~ `Adenoma Type`:strata(tgroup) +
-                 Gender + ethnicity + NSAIDs + Aspirin + strata(age_grp), data = dfs)
+                 Gender + ethnicity + NSAIDs + Aspirin + fh_crc + fh_polyps + strata(age_grp), data = dfs)
 out9s <- as.data.frame(summary(mod9s)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
   filter(grepl('Adenoma Type', variable)) %>%
@@ -457,110 +500,176 @@ out9s
 
 
 
-#-----------------------------------------------------------------------------------
-### Time-dependent Coefficient Models for five years 
 
-# Model 1: PolypType x Ethnicity (5-year follow-up)
-mod1s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypType * ethnicity + 
-                         sex + obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
+
+# Ensure fh_polyps and fh_crc are factors in dfs
+dfs$fh_polyps <- factor(dfs$fh_polyps, levels = c(0, 1), labels = c("No", "Yes"))
+dfs$fh_crc <- factor(dfs$fh_crc, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Model 10: Family History of Polyps with time-dependent interaction
+mod10s <- coxph(Surv(tstart, tstop, event) ~ fh_polyps + strata(tgroup) + fh_polyps:strata(tgroup) +
+                  Gender + ethnicity + NSAIDs + Aspirin + fh_crc +
+                  strata(obesity, age_grp, `Polyp Onset Stratification`), data = dfs)
+out10s <- as.data.frame(summary(mod10s)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(grepl('fh_polyps', variable)) %>%  # Match any variable name containing 'fh_polyps'
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out10s # Results for Family History of Polyps, reference is 'No' (no family history)
+
+# Model 11: Family History of CRC with time-dependent interaction
+mod11s <- coxph(Surv(tstart, tstop, event) ~ fh_crc + strata(tgroup) + fh_crc:strata(tgroup) +
+                  Gender + ethnicity + NSAIDs + Aspirin + fh_polyps +
+                  strata(obesity, age_grp, `Polyp Onset Stratification`), data = dfs)
+out11s <- as.data.frame(summary(mod11s)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(grepl('fh_crc', variable)) %>%  # Match any variable name containing 'fh_crc'
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out11s # Results for Family History of CRC, reference is 'No' (no family history)
+
+
+
+
+
+#____________________________________________________
+# Model 1: Polyp Type stratified by Sex, 5-year follow-up
+mod1s_sex_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypType:strata(sex) +
+                         ethnicity + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
+out1s_sex_5yr <- as.data.frame(summary(mod1s_sex_5yr)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out1s_sex_5yr # Results for PolypType, reference is 'Tubular'
+
+# Model 2: Dysplasia stratified by Sex, 5-year follow-up
+mod2s_sex_5yr <- coxph(Surv(tstart, tstop, event) ~ Dysplasiax:strata(sex) +
+                         ethnicity + `Polyp Type` + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
+out2s_sex_5yr <- as.data.frame(summary(mod2s_sex_5yr)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(substr(variable, 1, 5) == 'Dyspl') %>%
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out2s_sex_5yr # Results for Dysplasia, reference is 'Low grade'
+
+# Model 3: Number of Polyp stratified by Sex, 5-year follow-up
+mod3s_sex_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypNum:strata(sex) +
+                         ethnicity + `Polyp Type` + Dysplasia + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
+out3s_sex_5yr <- as.data.frame(summary(mod3s_sex_5yr)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out3s_sex_5yr # Results for Number of Polyp, reference is '<3'
+
+# Model 4: Size of Polyp stratified by Sex, 5-year follow-up
+mod4s_sex_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypSize:strata(sex) +
+                         ethnicity + `Polyp Type` + Dysplasia + `Number of Polyp` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
+out4s_sex_5yr <- as.data.frame(summary(mod4s_sex_5yr)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out4s_sex_5yr # Results for Size of Polyp (mm), reference is '<10'
+
+
+# Model 5: Adenoma Type stratified by Sex, 5-year follow-up
+mod5s_sex_5yr <- coxph(Surv(tstart, tstop, event) ~ `Adenoma Type`:strata(sex) +
+                         ethnicity + `Polyp Type` + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
+out5s_sex_5yr <- as.data.frame(summary(mod5s_sex_5yr)$coef) %>% 
+  rownames_to_column(var = 'variable') %>%
+  filter(grepl('Adenoma Type', variable)) %>%
+  mutate(HR = exp(coef), 
+         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
+         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
+  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
+out5s_sex_5yr # Results for Adenoma Type, reference is 'Low Risk'
+
+
+
+
+
+#Ethinicity___________________
+
+# Model 1: Polyp Type stratified by Ethnicity, 5-year follow-up
+mod1s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypType:strata(ethnicity) +
+                         sex + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
 out1s_eth_5yr <- as.data.frame(summary(mod1s_eth_5yr)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypType', variable)) %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
   mutate(HR = exp(coef), 
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out1s_eth_5yr # Results for PolypType across ethnicities, reference is 'Tubular'
+out1s_eth_5yr # Results for PolypType, reference is 'Tubular'
 
-# Model 2: Dysplasiax x Ethnicity (5-year follow-up)
-mod2s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ Dysplasiax * ethnicity + 
-                         sex + obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
+# Model 2: Dysplasia stratified by Ethnicity, 5-year follow-up
+mod2s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ Dysplasiax:strata(ethnicity) +
+                         sex + `Polyp Type` + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
 out2s_eth_5yr <- as.data.frame(summary(mod2s_eth_5yr)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
-  filter(grepl('Dyspl', variable)) %>%
+  filter(substr(variable, 1, 5) == 'Dyspl') %>%
   mutate(HR = exp(coef), 
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out2s_eth_5yr # Results for Dysplasiax across ethnicities, reference is 'Low grade'
+out2s_eth_5yr # Results for Dysplasia, reference is 'Low grade'
 
-# Model 3: PolypNum x Ethnicity (5-year follow-up)
-mod3s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypNum * ethnicity + 
-                         sex + obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
+# Model 3: Number of Polyp stratified by Ethnicity, 5-year follow-up
+mod3s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypNum:strata(ethnicity) +
+                         sex + `Polyp Type` + Dysplasia + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
 out3s_eth_5yr <- as.data.frame(summary(mod3s_eth_5yr)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypNum', variable)) %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
   mutate(HR = exp(coef), 
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out3s_eth_5yr # Results for PolypNum across ethnicities, reference is '<3'
+out3s_eth_5yr # Results for Number of Polyp, reference is '<3'
 
-# Model 4: PolypSize x Ethnicity (5-year follow-up)
-mod4s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypSize * ethnicity + 
-                         sex + obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
+# Model 4: Size of Polyp stratified by Ethnicity, 5-year follow-up
+mod4s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypSize:strata(ethnicity) +
+                         sex + `Polyp Type` + Dysplasia + `Number of Polyp` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
 out4s_eth_5yr <- as.data.frame(summary(mod4s_eth_5yr)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypSize', variable)) %>%
+  filter(substr(variable, 1, 5) == 'Polyp') %>%
   mutate(HR = exp(coef), 
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out4s_eth_5yr # Results for PolypSize across ethnicities, reference is '<10'
+out4s_eth_5yr # Results for Size of Polyp (mm), reference is '<10'
 
-
-
-
-
-
-
-# Model 5: PolypType x Sex (5-year follow-up)
-mod5s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypType * sex + ethnicity + 
-                         obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
+# Model 5: Adenoma Type stratified by Ethnicity, 5-year follow-up
+mod5s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ `Adenoma Type`:strata(ethnicity) +
+                         sex + `Polyp Type` + Dysplasia + `Number of Polyp` + `Size of Polyp (mm)` + NSAIDs + Aspirin + fh_crc + fh_polyps +
+                         strata(obesity, `Polyp Onset Stratification`, age_grp), data = dfs_5yr)
 out5s_eth_5yr <- as.data.frame(summary(mod5s_eth_5yr)$coef) %>% 
   rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypType', variable)) %>%
+  filter(grepl('Adenoma Type', variable)) %>%
   mutate(HR = exp(coef), 
          HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
          HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
   select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out5s_eth_5yr # Results for PolypType across ethnicities, reference is 'Tubular'
-
-
-# Model 6: Dysplasiax x Sex (5-year follow-up)
-mod6s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ Dysplasiax * sex + ethnicity + 
-                         obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
-out6s_eth_5yr <- as.data.frame(summary(mod6s_eth_5yr)$coef) %>% 
-  rownames_to_column(var = 'variable') %>%
-  filter(grepl('Dyspl', variable)) %>%
-  mutate(HR = exp(coef), 
-         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
-         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
-  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out6s_eth_5yr # Results for Dysplasiax across ethnicities, reference is 'Low grade'
-
-
-# Model 7: PolypNum x Sex (5-year follow-up)
-mod7s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypNum * sex + ethnicity + 
-                         obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
-out7s_eth_5yr <- as.data.frame(summary(mod7s_eth_5yr)$coef) %>% 
-  rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypNum', variable)) %>%
-  mutate(HR = exp(coef), 
-         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
-         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
-  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out7s_eth_5yr # Results for PolypNum across ethnicities, reference is '<3'
-
-
-# Model 8: PolypSize x Sex (5-year follow-up)
-mod8s_eth_5yr <- coxph(Surv(tstart, tstop, event) ~ PolypSize * sex + ethnicity  
-                       + obesity + NSAIDs + Aspirin + age_in, data = dfs_5yr)
-out8s_eth_5yr <- as.data.frame(summary(mod8s_eth_5yr)$coef) %>% 
-  rownames_to_column(var = 'variable') %>%
-  filter(grepl('PolypSize', variable)) %>%
-  mutate(HR = exp(coef), 
-         HR_lower = exp(coef - qnorm(0.975) * `se(coef)`),
-         HR_upper = exp(coef + qnorm(0.975) * `se(coef)`)) %>% 
-  select(variable, HR, HR_lower, HR_upper, `Pr(>|z|)`)
-out8s_eth_5yr # Results for PolypSize across ethnicities, reference is '<10'
+out5s_eth_5yr # Results for Adenoma Type, reference is 'Low Risk'
